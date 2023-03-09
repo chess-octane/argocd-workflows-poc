@@ -1,0 +1,85 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: speedpay-payments-cron
+spec:
+  schedule: "*/3 * * * *"
+  timezone: "US/Central"
+  concurrencyPolicy: "Replace"
+  startingDeadlineSeconds: 0
+  failedJobsHistoryLimit: 10
+  successfulJobsHistoryLimit: 10
+
+  workflowSpec:
+    entrypoint: main
+    serviceAccountName: default
+    templates:
+    - name: main
+      dag:
+        tasks:
+          - name: copy-from-sftp
+            template: sftp-to-s3
+          - name: push-to-loanpro
+            template: s3-to-loanpro
+            dependencies: [copy-from-sftp]
+            arguments:
+              parameters:
+                - name: fileList
+                  value: "{{ tasks.copy-from-sftp.outputs.parameters.fileList }}"
+
+    - name: sftp-to-s3
+      outputs:
+        parameters:
+          - name: fileList
+            valueFrom:
+              path: /fileList.txt
+      container:
+        image: octane/sftp-to-s3
+        imagePullPolicy: IfNotPresent
+        command: [node]
+        args: ["index.js"]
+        env:
+          - name: SFTP_CREDENTIALS_SECRET_NAME
+            value: "airflow/connections/speedpay-ftp"
+          - name: SFTP_FOLDER
+            value: "/"
+          - name: SFTP_FILE_NAME
+            value: "EXPORT_"
+          - name: S3_BUCKET_NAME
+            value: "ch-airflow-dev"
+          - name: OUTPUT_FILE_PATH
+            value: "/fileList.txt"
+          - name: AWS_REGION
+            value: us-east-1
+          - name: AWS_ACCESS_KEY_ID
+            value: XXX
+          - name: AWS_SECRET_ACCESS_KEY
+            value: ZZZ
+
+    - name: s3-to-loanpro
+      inputs:
+        parameters:
+        - name: fileList
+          value: "{{ tasks.sftp-to-s3.outputs.parameters.fileList }}"
+      container:
+        image: octane/s3-to-loanpro
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args: ["main.py", "{{ inputs.parameters.fileList }}"]
+        env:
+          - name: S3_BUCKET_NAME
+            value: "ch-airflow-dev"
+          - name: LOANPRO_API_SECRET_NAME
+            value: "airflow/connections/loanpro-api"
+          - name: LOANPRO_ENTITY
+            value: "Payments"
+          - name: LOANPRO_IMPORT_PROGRESSION
+            value: "auto"
+          - name: LOANPRO_REJECTION_TYPE
+            value: "line"
+          - name: AWS_REGION
+            value: us-east-1
+          - name: AWS_ACCESS_KEY_ID
+            value: XXX
+          - name: AWS_SECRET_ACCESS_KEY
+            value: ZZZ
